@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Razorpay Test Checkout</title>
+
+    <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
+
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background: #f4f6f8;
+            margin: 0;
+            padding: 40px 16px;
+        }
+
+        .card {
+            max-width: 600px;
+            margin: 0 auto;
+            background: white;
+            padding: 24px;
+            border-radius: 10px;
+            box-shadow: 0 4px 14px rgba(0, 0, 0, 0.1);
+        }
+
+        textarea,
+        button {
+            box-sizing: border-box;
+            width: 100%;
+        }
+
+        textarea {
+            min-height: 110px;
+            margin: 8px 0 16px;
+            padding: 10px;
+        }
+
+        button {
+            padding: 12px;
+            border: 0;
+            border-radius: 6px;
+            background: #2d6cdf;
+            color: white;
+            cursor: pointer;
+        }
+
+        button:disabled {
+            background: #9aa4b2;
+            cursor: not-allowed;
+        }
+
+        pre {
+            margin-top: 18px;
+            padding: 12px;
+            background: #f0f2f5;
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
+        }
+    </style>
+</head>
+<body>
+<main class="card">
+    <h1>Razorpay Test Checkout</h1>
+
+    <p>
+        Paste the JWT received from the Login API. The user’s cart must contain at least one product.
+    </p>
+
+    <label for="jwtToken">JWT token</label>
+    <textarea
+            id="jwtToken"
+            placeholder="Paste JWT token here (Bearer optional)"
+    ></textarea>
+
+    <button id="payButton" type="button">
+        Start Test Payment
+    </button>
+
+    <pre id="result">Ready</pre>
+</main>
+
+<script>
+    const tokenInput = document.getElementById("jwtToken");
+    const payButton = document.getElementById("payButton");
+    const result = document.getElementById("result");
+
+    function showResult(message, data) {
+        result.textContent = data
+            ? message + "\n\n" + JSON.stringify(data, null, 2)
+            : message;
+    }
+
+    function getToken() {
+        return tokenInput.value
+            .trim()
+            .replace(/^Bearer\s+/i, "");
+    }
+
+    async function callApi(path, options = {}) {
+        const token = getToken();
+
+        if (!token) {
+            throw new Error("JWT token is required");
+        }
+
+        const response = await fetch(path, {
+            ...options,
+            headers: {
+                "Authorization": "Bearer " + token,
+                "Content-Type": "application/json",
+                ...(options.headers || {})
+            }
+        });
+
+        const body = await response
+            .json()
+            .catch(() => null);
+
+        if (!response.ok) {
+            throw new Error(
+                body?.message
+                || "Request failed with status " + response.status
+            );
+        }
+
+        return body;
+    }
+
+    async function verifyPayment(checkout, razorpayResponse) {
+        showResult("Payment completed. Verifying signature...");
+
+        const verificationResponse = await callApi(
+            "/api/orders/payments/verify",
+            {
+                method: "POST",
+                body: JSON.stringify({
+                    orderId: checkout.orderId,
+                    razorpayOrderId: checkout.razorpayOrderId,
+                    razorpayPaymentId:
+                        razorpayResponse.razorpay_payment_id,
+                    razorpaySignature:
+                        razorpayResponse.razorpay_signature
+                })
+            }
+        );
+
+        showResult(
+            "Payment verified. Order confirmed.",
+            verificationResponse
+        );
+    }
+
+    payButton.addEventListener("click", async () => {
+        payButton.disabled = true;
+
+        try {
+            if (typeof Razorpay === "undefined") {
+                throw new Error(
+                    "Razorpay Checkout could not be loaded"
+                );
+            }
+
+            showResult("Starting checkout...");
+
+            const checkoutResponse = await callApi(
+                "/api/orders",
+                {method: "POST"}
+            );
+
+            const checkout = checkoutResponse.data;
+
+            if (!checkout
+                || !checkout.razorpayKeyId
+                || !checkout.razorpayOrderId) {
+
+                throw new Error(
+                    "Invalid checkout response received"
+                );
+            }
+
+            showResult(
+                "Checkout created. Opening Razorpay...",
+                checkout
+            );
+
+            const razorpay = new Razorpay({
+                key: checkout.razorpayKeyId,
+                amount: Math.round(
+                    Number(checkout.amount) * 100
+                ),
+                currency: checkout.currency,
+                name: "E-Commerce Demo",
+                description:
+                    "Payment for Order " + checkout.orderId,
+                order_id: checkout.razorpayOrderId,
+
+                handler: async function (razorpayResponse) {
+                    try {
+                        await verifyPayment(
+                            checkout,
+                            razorpayResponse
+                        );
+
+                    } catch (error) {
+                        showResult(
+                            "Payment verification failed: "
+                            + error.message
+                        );
+
+                    } finally {
+                        payButton.disabled = false;
+                    }
+                },
+
+                modal: {
+                    ondismiss: function () {
+                        showResult(
+                            "Payment window closed. Order is still PENDING."
+                        );
+                        payButton.disabled = false;
+                    }
+                }
+            });
+
+            razorpay.on("payment.failed", function (response) {
+                showResult(
+                    "Payment failed: "
+                    + response.error.description
+                );
+                payButton.disabled = false;
+            });
+
+            razorpay.open();
+
+        } catch (error) {
+            showResult(error.message);
+            payButton.disabled = false;
+        }
+    });
+</script>
+</body>
+</html>
